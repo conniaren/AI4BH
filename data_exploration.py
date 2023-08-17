@@ -2,11 +2,18 @@ import vcf_data_loader
 import pytorch_lightning as pl
 import torch 
 from torch import nn 
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader
+import pandas as pd
+import numpy as np
+from torchvision import datasets
+import torchvision.transforms as transforms
+
+CUDA_LAUNCH_BLOCKING=1
 
 class autoencoder(pl.LightningModule):
-    def __init__(self, input_size, base_layer_size = 512, lr = 1e-3):
+    def __init__(self, input_size, base_layer_size = 512, lr = 1e-3, mnist = False):
         super().__init__()
+        self.mnist = mnist
         self.input_size = input_size
         self.encoder = nn.Sequential(nn.Linear(input_size, base_layer_size), 
                                      nn.BatchNorm1d(base_layer_size),
@@ -27,28 +34,37 @@ class autoencoder(pl.LightningModule):
                                      nn.Linear(base_layer_size//2, base_layer_size),
                                      nn.BatchNorm1d(base_layer_size),
                                      nn.LeakyReLU(),
-                                     nn.Linear(base_layer_size,input_size*3),
-                                     nn.Softmax())
+                                     nn.Linear(base_layer_size,input_size*2),
+                                     nn.Unflatten(1,(2,input_size)),
+                                     nn.Softmax(dim = 1))
         self.lr = lr
+        self.save_hyperparameters()
     
     def forward(self, x):
+        x = x.to(torch.device("cuda"))
+        if self.mnist: 
+            x, label = x
+            x = x.view(x.size(0),-1)
         x_tilda = self.encoder(x)
         y = self.decoder(x_tilda)
-        y = y.view(x.size(0), 3, self.input_size)
         top_p, top_class = y.topk(1, dim = 1)
         return top_class
     
     def training_step(self, batch, i):
+        if self.mnist: 
+            print(batch)
+            batch, label = batch
+            batch = batch.view(batch.size(0),-1).to(torch.device("cuda"))
         z = self.encoder (batch)
         x_hat = self.decoder(z)
-        x_hat = x_hat.view(batch.size(0), 3, self.input_size)
         regularisation = 0
         for param in self.parameters():
             if len(param.shape)>1:
                 regularisation += torch.mean(torch.square(param))
         ce_loss = nn.CrossEntropyLoss()
-        loss = ce_loss(batch, x_hat) + 1e-4*regularisation
-        self.log("Training_error", loss, on_epoch = True)
+        batch = batch.type(torch.LongTensor)
+        loss = ce_loss(x_hat,batch) + 1e-4*regularisation
+        self.log("Training_error", loss, on_epoch = True, on_step = False, prog_bar = True)
         return loss
     
     def configure_optimizers(self):
@@ -58,20 +74,57 @@ class autoencoder(pl.LightningModule):
 vcf = vcf_data_loader.FixedSizeVCFChunks("ReferencePanel_v1_highQual_MAF0.005_filtered.vcf.gz", max_snps_per_chunk=690, create = True)
 data_o = vcf.get_tensor_for_chunk_id(0)
 
+print(torch.unique(data_o, return_counts = True))
+
+#MNIST dataset
+def quantize(image:torch.Tensor)->torch.Tensor:
+    for i in range(image.size()[1]):
+        for j in range(image.size()[2]):
+            if image[:,i,j] <0.5:
+                image[:,i,j] = 0
+            else:
+                image[:,i,j] = 1
+    
+    return image 
+
+
+transform  = transforms.Compose([transforms.ToTensor(), transforms.Lambda(quantize)])
+train_data = datasets.MNIST(root='data', train = True, download = True, transform = transform)
+test_data = datasets.MNIST(root = 'data', train = False, download = True, transform = transform)
+
+epochs = 10
+
+#Data processing: replace -1 with medians
+torch.manual_seed(555)
+nump = data_o.numpy()
+df = pd.DataFrame(nump)
+df[df == -1] = np.nan 
+df = df.fillna(df.median(axis=0))
+data_o = torch.tensor(df.values).to(device = 'cuda')
 
 print(torch.unique(data_o, return_counts = True))
-'''
-epochs = 1
 
-torch.manual_seed(555)
 
 print("-----------------------------------")
 dataloader = DataLoader(data_o, batch_size=100, num_workers=8)
 model = autoencoder(690)
+
+train_loader = torch.utils.data.DataLoader(train_data, batch_size=20, num_workers=64, pin_memory = True, shuffle = True)
+test_loader = torch.utils.data.DataLoader(test_data, batch_size=20, num_workers=64, pin_memory = True, shuffle = True)
+
+model_mnist = autoencoder(784, mnist=True).to(torch.device("cuda"))
+
+dataiter = iter(train_loader)
+images, labels = next(dataiter)
+img_flat = images.view(images.size(0), -1)
+
+print(torch.unique(img_flat, return_counts = True))
+
+
 trainer = pl.Trainer(logger = pl.loggers.TensorBoardLogger("tb_logs", name = "autoencoder_model"),
                      log_every_n_steps = 1, 
-                     accelerator= "cpu",
-                     max_epochs = epochs)
+                     accelerator= "gpu",
+                     max_epochs = epochs,
+                     devices = -1)
 
-trainer.fit(model,dataloader)
-'''
+trainer.fit(model_mnist,train_loader)
