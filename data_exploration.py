@@ -43,7 +43,6 @@ class autoencoder(pl.LightningModule):
     def forward(self, x):
         x = x.to(torch.device("cuda"))
         if self.mnist: 
-            x, label = x
             x = x.view(x.size(0),-1)
         x_tilda = self.encoder(x)
         y = self.decoder(x_tilda)
@@ -52,7 +51,6 @@ class autoencoder(pl.LightningModule):
     
     def training_step(self, batch, i):
         if self.mnist: 
-            print(batch)
             batch, label = batch
             batch = batch.view(batch.size(0),-1).to(torch.device("cuda"))
         z = self.encoder (batch)
@@ -62,7 +60,7 @@ class autoencoder(pl.LightningModule):
             if len(param.shape)>1:
                 regularisation += torch.mean(torch.square(param))
         ce_loss = nn.CrossEntropyLoss()
-        batch = batch.type(torch.LongTensor)
+        batch = batch.type(torch.LongTensor).to(torch.device("cuda"))
         loss = ce_loss(x_hat,batch) + 1e-4*regularisation
         self.log("Training_error", loss, on_epoch = True, on_step = False, prog_bar = True)
         return loss
@@ -120,11 +118,46 @@ img_flat = images.view(images.size(0), -1)
 
 print(torch.unique(img_flat, return_counts = True))
 
-
+'''
 trainer = pl.Trainer(logger = pl.loggers.TensorBoardLogger("tb_logs", name = "autoencoder_model"),
                      log_every_n_steps = 1, 
                      accelerator= "gpu",
                      max_epochs = epochs,
                      devices = -1)
+'''
 
+#trainer.fit(model_mnist,train_loader)
+
+#path = f"./model-mnist.pth"
+#torch.save(model_mnist.state_dict(), path)
+
+import matplotlib.pyplot as plt 
+
+model_mnist.load_state_dict(torch.load(f"./model-mnist.pth"))
+
+
+
+dataiter = iter(test_loader)
+images, labels = next(dataiter)
+
+images_flatten = images.view(images.size(0), -1)
+# get sample outputs
+output = model_mnist(images_flatten)
+# prep images for display
+images = images.numpy()
+
+# output is resized into a batch of images
+output = output.view(20, 1, 28, 28)
+# use detach when it's an output that requires_grad
+output = output.detach().cpu().numpy()
+
+# plot the first ten input images and then reconstructed images
+fig, axes = plt.subplots(nrows=2, ncols=10, sharex=True, sharey=True, figsize=(25,4))
+
+# input images on top row, reconstructions on bottom
+for images, row in zip([images, output], axes):
+    for img, ax in zip(images, row):
+        ax.imshow(np.squeeze(img), cmap='gray')
+        ax.get_xaxis().set_visible(False)
+        ax.get_yaxis().set_visible(False)
 trainer.fit(model_mnist,train_loader)
